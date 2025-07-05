@@ -530,9 +530,17 @@ const App = () => {
           const [insightsBase, setInsightsBase] = useState([]);
           const [insights, setInsights] = useState([]);
 
-          const allTags = useMemo(() => [...new Set(insightsBase.flatMap(insight => insight.tags || []))].sort(), [insightsBase]);
-          const allCoaches = useMemo(() => [...new Set(insightsBase.flatMap(insight => insight.coach ? [insight.coach] : []))].sort(), [insightsBase]);
+          const allTags = useMemo(() => {
+            return Array.isArray(insightsBase)
+              ? [...new Set(insightsBase.flatMap(insight => insight.tags || []))].sort()
+              : [];
+          }, [insightsBase]);
 
+          const allCoaches = useMemo(() => {
+            return Array.isArray(insightsBase)
+              ? [...new Set(insightsBase.flatMap(insight => insight.coach ? [insight.coach] : []))].sort()
+              : [];
+          }, [insightsBase]);
 
           const [searchTerm, setSearchTerm] = useState('');
           const [selectedTags, setSelectedTags] = useState([]);
@@ -547,9 +555,93 @@ const App = () => {
           const [sortOrder, setSortOrder] = useState('date-desc');
           const [visibleCount, setVisibleCount] = useState(ITEMS_PER_PAGE);
           const [isSticky, setIsSticky] = useState(false);
-          const [isDirty, setIsDirty] = useState(false);     
-          // This state controls the welcome modal. It defaults to true only if the user hasn't visited before.
-          const [showWelcome, setShowWelcome] = useState(!localStorage.getItem('hasUsedAppBefore'));
+          
+        const DB_NAME = 'JazzInsightsDB';
+        const DB_VERSION = 1;
+        const STORE_NAME = 'insights';
+        
+        function openDatabase() {
+          return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, DB_VERSION);
+            request.onerror = (event) => reject(event.target.error);
+            request.onsuccess = (event) => resolve(event.target.result);
+            request.onupgradeneeded = (event) => {
+              const db = event.target.result;
+              if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME);
+              }
+            };
+          });
+        }
+        
+        function saveToIndexedDB(key, data) {
+          return openDatabase().then(db => {
+            return new Promise((resolve, reject) => {
+              const tx = db.transaction(STORE_NAME, 'readwrite');
+              const store = tx.objectStore(STORE_NAME);
+              store.put(data, key);
+              tx.oncomplete = resolve;
+              tx.onerror = (event) => reject(event.target.error);
+            });
+          });
+        }
+        
+        function loadFromIndexedDB(key) {
+          return openDatabase().then(db => {
+            return new Promise((resolve, reject) => {
+              const tx = db.transaction(STORE_NAME, 'readonly');
+              const store = tx.objectStore(STORE_NAME);
+              const request = store.get(key);
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = (event) => reject(event.target.error);
+            });
+          });
+        }
+
+  
+        useEffect(() => {
+          if (!insights || insights.length === 0) return;
+        
+          const userData = insights.map(i => ({
+            id: i.id,
+            fav: i.fav,
+            reviewed: i.reviewed,
+            note: i.note
+          }));
+          saveToIndexedDB('userData', userData);
+        }, [insights]);
+
+        useEffect(() => {
+          Promise.all([
+            loadFromIndexedDB('insights'),
+            loadFromIndexedDB('userData')
+          ])
+            .then(([storedInsights, userData]) => {
+              if (!Array.isArray(storedInsights)) return;
+        
+              setInsightsBase(storedInsights);
+        
+              // Map userData by ID for fast lookup
+              const userMap = new Map((userData || []).map(entry => [entry.id, entry]));
+        
+              // Merge userData into base insights
+              const merged = storedInsights.map(insight => {
+                const user = userMap.get(insight.id) || {};
+                return {
+                  ...insight,
+                  fav: user.fav || false,
+                  reviewed: user.reviewed || false,
+                  note: user.note || ''
+                };
+              });
+        
+              setInsights(merged);
+            })
+            .catch((e) => {
+              console.error("Failed to load insights or user data from IndexedDB:", e);
+            });
+        }, []);
+
           
           const headerContainerRef = useRef(null);
           const fileInputRef = useRef(null);
@@ -563,8 +655,49 @@ const App = () => {
             link.href = url;
             link.click();
             URL.revokeObjectURL(url);
-            setIsDirty(false);
           };
+
+        const handleLoadInsights = () => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.accept = '.json';
+          input.onchange = (event) => {
+            const file = event.target.files[0];
+            if (!file) return;
+        
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+              try {
+                const data = JSON.parse(e.target.result);
+        
+                // Save to IndexedDB instead of localStorage
+                await saveToIndexedDB('insights', data);
+        
+                if (!Array.isArray(data) || !data.every(insight => insight.id && insight.title && insight.call_date)) {
+                  throw new Error("Invalid insights file format.");
+                }
+                
+                setInsightsBase(data);
+                setInsights(data.map(insight => ({
+                  ...insight,
+                  fav: false,
+                  reviewed: false,
+                  note: ''
+                })));
+                alert("Insights loaded successfully.");
+              } catch (err) {
+                alert("Error loading insights: " + err.message);
+              }
+            };
+            reader.readAsText(file);
+          };
+          input.click();
+        };
+        
+        const handleImportUserData = () => {
+          fileInputRef.current.click();
+        };
+
 
           const handleImport = (event) => {
             const file = event.target.files[0];
@@ -582,11 +715,7 @@ const App = () => {
                   }));
                   setInsights(mergedInsights);
                   alert('Data imported successfully!');
-                  setIsDirty(false);
 
-                  // Set flag so welcome screen doesn't show again
-                  localStorage.setItem('hasUsedAppBefore', 'true');
-                  setShowWelcome(false); // Hide welcome modal after successful import
                 } else {
                   alert('Error: Invalid JSON file format.');
                 }
@@ -604,11 +733,6 @@ const App = () => {
             fileInputRef.current.click();
           };
 
-          const handleWelcomeStartFresh = () => {
-            localStorage.setItem('hasUsedAppBefore', 'true');
-            setShowWelcome(false);
-          };
-
           useEffect(() => {
             const handleScroll = () => {
               if (headerContainerRef.current) {
@@ -618,20 +742,7 @@ const App = () => {
             window.addEventListener('scroll', handleScroll);
             return () => window.removeEventListener('scroll', handleScroll);
           }, []);
-          
-          useEffect(() => {
-            const handleBeforeUnload = (event) => {
-              if (isDirty) {
-                event.preventDefault();
-                event.returnValue = '';
-              }
-            };
-            window.addEventListener('beforeunload', handleBeforeUnload);
-            return () => {
-              window.removeEventListener('beforeunload', handleBeforeUnload);
-            };
-          }, [isDirty]);
-                              
+                                        
           const [isFilterOverlayVisible, setIsFilterOverlayVisible] = useState(false);
                 
           const monthNames = useMemo(() => ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"], []);
@@ -735,15 +846,25 @@ const App = () => {
 		        selectedTags.length > 0 || selectedCoaches.length > 0 ||
 		        selectedYear || favOnly || reviewedOnly || hasNoteOnly || searchTerm;
 
-          const updateInsight = (id, updateFn) => {
-            setInsights(currentInsights => 
-              currentInsights.map(insight => 
-                insight.id === id ? updateFn(insight) : insight
-              )
-            );
-            setIsDirty(true); // Add this line
+            const updateInsight = (id, updateFn) => {
+              setInsights(currentInsights => {
+                const updated = currentInsights.map(insight =>
+                  insight.id === id ? updateFn(insight) : insight
+                );
+            
+                // Save user data subset to IndexedDB
+                const userData = updated.map(i => ({
+                  id: i.id,
+                  fav: i.fav,
+                  reviewed: i.reviewed,
+                  note: i.note
+                }));
+                saveToIndexedDB('userData', userData);
+            
+                return updated;
+              });
+            };
 
-          };
 
           const handleToggleFav = (id) => {
             updateInsight(id, insight => ({ ...insight, fav: !insight.fav }));
@@ -795,8 +916,7 @@ const App = () => {
 
 return (
             <>
-              {showWelcome && <WelcomeModal onLoadData={handleWelcomeLoadData} onStartFresh={handleWelcomeStartFresh} />}
-              
+                          
               <div className="bg-parchment min-h-screen text-brand-dark">
                 
                 <StickyHeader 
@@ -821,28 +941,29 @@ return (
                       </div>
                       <p className="text-base md:text-lg text-gray-600 max-w-3xl mx-auto">An interactive library of teaching moments from Nick Mainella and Chris Klaxton.</p>
                       
-                      <div className="mt-6 flex justify-center gap-3">
-                        <button
-                          onClick={() => fileInputRef.current.click()}
-                          className="bg-white text-brand-dark font-semibold py-2 px-5 border border-stone-300 rounded-full hover:bg-brand-tan transition-colors cursor-pointer"
-                        >
-                          Import Data
-                        </button>
-                        <input 
-                          type="file" 
-                          id="insightsFileInput"
-                          ref={fileInputRef} 
-                          accept=".json" 
-                          className="hidden" 
-                          onChange={handleImport} 
-                        />
-                        <button
-                          onClick={handleExport}
-                          className="bg-brand-dark text-white font-semibold py-2 px-5 rounded-full hover:bg-opacity-80 transition-colors"
-                        >
-                          Export Data
-                        </button>
-                      </div>
+                    <div className="mt-6 flex justify-center gap-3">
+                      <button
+                        onClick={handleLoadInsights}
+                        className="bg-blue-500 text-white font-semibold py-2 px-5 rounded-full hover:bg-blue-600 transition-colors"
+                      >
+                        Load Insights
+                      </button>
+                    
+                      <button
+                        onClick={handleImportUserData}
+                        className="bg-green-500 text-white font-semibold py-2 px-5 rounded-full hover:bg-green-600 transition-colors"
+                      >
+                        Load User Data
+                      </button>
+                    
+                      <button
+                        onClick={handleExport}
+                        className="bg-yellow-400 text-black font-semibold py-2 px-5 rounded-full hover:bg-yellow-500 transition-colors"
+                      >
+                        Export User Data
+                      </button>
+                    </div>
+
                     </header>
 
                     <div className="max-w-4xl mx-auto space-y-6 mb-8">
